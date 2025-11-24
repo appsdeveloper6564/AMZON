@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { ChatMode } from "../types";
+import { ChatMode, Product } from "../types";
 
 // Standard client for basic tasks (Flash/Lite)
 const genAI = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -10,12 +10,6 @@ const getProClient = async () => {
   if (win.aistudio && win.aistudio.hasSelectedApiKey) {
     const hasKey = await win.aistudio.hasSelectedApiKey();
     if (hasKey) {
-       // When using the selected key, we just instantiate a new client. 
-       // The environment will handle the key injection for the 'veo' or 'pro-image' models via the internal proxy if strictly required,
-       // BUT for this specific prompt instruction regarding 'gemini-3-pro-image-preview', 
-       // we usually need to ensure we are in a context that supports it.
-       // We will assume the standard process.env.API_KEY is a paid key for simplicity unless the specific window flow is triggered.
-       // However, per prompt: "Upgrade to gemini-3-pro-image-preview... users MUST select their own API key."
        return new GoogleGenAI({ apiKey: process.env.API_KEY }); 
     }
   }
@@ -115,4 +109,93 @@ export const generateProductImage = async (
     }
   }
   throw new Error("No image generated");
+};
+
+export const searchProducts = async (query: string, category: string = 'All'): Promise<Product[]> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  const categoryInstruction = category !== 'All' 
+    ? `Strictly restrict results to items within the "${category}" category.` 
+    : "Determine the most appropriate category for each item based on Amazon standards.";
+
+  const prompt = `Act as an expert Amazon product search and recommendation engine.
+  
+  User Query: "${query}"
+  Category Context: ${categoryInstruction}
+  
+  Task: Generate a list of 8 real, high-quality products available on Amazon India that best satisfy the user's request.
+  
+  Reasoning Strategy:
+  1. **Intent Analysis**: deeply analyze the query. 
+     - If it's a **Setup/Ecosystem** query (e.g., "full gaming setup", "coffee station"), break it down and return a diverse mix of complementary items (e.g., monitor + keyboard + mouse, or machine + beans + mug).
+     - If it's a **Comparison** query (e.g., "iPhone 15 vs S24"), return the competing products side-by-side.
+     - If it's a **Specific** query (e.g., "Sony XM5"), return that specific product and closest alternatives.
+  2. **Filtering**: Strictly adhere to any explicit constraints in the query like "under ₹2000", "red color", or specific brands.
+  3. **Data Quality**: Ensure prices are realistic current market prices in INR (₹).
+  
+  Output Schema Requirements:
+  - 'image_prompt': A highly detailed, photorealistic visual description of the product on a clean studio background.
+  - 'id': unique string.
+  
+  Return ONLY valid JSON matching this schema:
+  {
+    type: ARRAY,
+    items: {
+      id: STRING,
+      title: STRING,
+      description: STRING (2 sentences max),
+      price: STRING (formatted like ₹1,999),
+      rating: STRING (e.g., 4.5/5),
+      reviewCount: NUMBER,
+      features: ARRAY of STRING,
+      category: STRING,
+      image_prompt: STRING
+    }
+  }`;
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: prompt,
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            id: { type: Type.STRING },
+            title: { type: Type.STRING },
+            description: { type: Type.STRING },
+            price: { type: Type.STRING },
+            rating: { type: Type.STRING },
+            reviewCount: { type: Type.NUMBER },
+            features: { 
+              type: Type.ARRAY, 
+              items: { type: Type.STRING } 
+            },
+            category: { type: Type.STRING },
+            image_prompt: { type: Type.STRING },
+          },
+          required: ['id', 'title', 'price', 'rating', 'description', 'features', 'image_prompt', 'category']
+        }
+      }
+    }
+  });
+
+  if (response.text) {
+    try {
+      const rawProducts = JSON.parse(response.text);
+      // Transform raw AI data into App Product type with generated image URLs
+      return rawProducts.map((p: any) => ({
+        ...p,
+        affiliate_link: `https://www.amazon.in/s?k=${encodeURIComponent(p.title)}`, // Fallback search link
+        image: `https://image.pollinations.ai/prompt/${encodeURIComponent(p.image_prompt)}?width=400&height=400&nologo=true`
+      }));
+    } catch (e) {
+      console.error("Failed to parse AI search results", e);
+      return [];
+    }
+  }
+
+  return [];
 };
